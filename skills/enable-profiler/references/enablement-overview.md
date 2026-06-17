@@ -36,9 +36,13 @@ Add the profiler NuGet package and enable it in code. See the EventPipe setup se
 3. Set `APPLICATIONINSIGHTS_CONNECTION_STRING` environment variable
 4. Build and deploy container
 
-### Azure Functions — ETW, no code change
+### Azure Functions (in-process, classic AI SDK) — ETW, no code change
 
-Enable via Azure Portal (same as App Service). Requires **App Service plan** (not Consumption plan).
+Enable via Azure Portal (same as App Service). Requires **App Service plan** (not Consumption plan). This applies only to the **in-process** hosting model with the classic Application Insights SDK.
+
+### Azure Functions (isolated worker / OpenTelemetry) — EventPipe, code change
+
+Isolated-worker Functions apps (and any Functions app using `Azure.Monitor.OpenTelemetry.Exporter`) require the **EventPipe** profiler. See the EventPipe section below for setup instructions.
 
 ### VMs / VMSS — ETW, ARM template
 
@@ -65,6 +69,38 @@ builder.Services.AddOpenTelemetry()
     .UseAzureMonitor()
     .AddAzureMonitorProfiler();
 ```
+
+### With Azure Monitor OpenTelemetry exporter (Azure Functions isolated worker)
+
+> **Note:** This path uses the same underlying EventPipe profiler mechanism as the OTel distro path above, but the combination with `UseAzureMonitorExporter()` (rather than `UseAzureMonitor()`) is not yet documented in the [official profiler repo](https://github.com/Azure/azuremonitor-opentelemetry-profiler-net). It is expected to work because `AddAzureMonitorProfiler()` hooks into the OpenTelemetry pipeline independent of the exporter choice. If profiler data does not appear after enablement, fall back to the OTel distro path (`UseAzureMonitor()`) as a verified alternative.
+
+This assumes the app already has `Microsoft.Azure.Functions.Worker.OpenTelemetry` and `Azure.Monitor.OpenTelemetry.Exporter` configured. If not, install them first:
+
+```bash
+dotnet add package Microsoft.Azure.Functions.Worker.OpenTelemetry
+dotnet add package Azure.Monitor.OpenTelemetry.Exporter
+dotnet add package Azure.Monitor.OpenTelemetry.Profiler --prerelease
+```
+
+```csharp
+// In Program.cs for an isolated worker Functions app:
+var host = new HostBuilder()
+    .ConfigureFunctionsWorkerDefaults()
+    .ConfigureServices(services =>
+    {
+        services.AddOpenTelemetry()
+            .UseFunctionsWorkerDefaults()
+            .UseAzureMonitorExporter()
+            .AddAzureMonitorProfiler();
+    })
+    .Build();
+
+host.Run();
+```
+
+> **Note:** `UseFunctionsWorkerDefaults()` is an `OpenTelemetryBuilder` extension from `Microsoft.Azure.Functions.Worker.OpenTelemetry` (distinct from the `IHostBuilder.ConfigureFunctionsWorkerDefaults()` call above). It registers Functions-specific instrumentation so that function invocations are properly traced. `UseAzureMonitorExporter()` exports telemetry directly to Azure Monitor.
+
+The profiler reads the connection string from `APPLICATIONINSIGHTS_CONNECTION_STRING`, so no extra configuration is needed when that environment variable is already set.
 
 ### With classic Application Insights SDK
 

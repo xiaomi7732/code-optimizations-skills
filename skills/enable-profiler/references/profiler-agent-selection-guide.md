@@ -25,7 +25,8 @@ If targeting [.NET Framework](https://dotnet.microsoft.com/download/dotnet-frame
 If targeting [.NET](https://dotnet.microsoft.com/download/dotnet) (.NET 6, .NET 8, etc.):
 
 - **Linux or containers** (AKS, Container Apps, ACI) → use **EventPipe**
-- **Windows Azure services** → either ETW (simpler, no code changes) or EventPipe (lighter, in-proc)
+- **Azure Functions isolated worker** (or any Functions app using OpenTelemetry) → use **EventPipe**
+- **Windows Azure services** (other than above) → either ETW (simpler, no code changes) or EventPipe (lighter, in-proc)
 
 > ⚠️ Do NOT use both profilers at the same time — the combined overhead is not recommended.
 
@@ -46,6 +47,7 @@ Two flavors of EventPipe profiler exist, depending on your Application Insights 
 | .NET (modern) | App Service (Windows) | ETW or EventPipe | No / Yes |
 | .NET (modern) | App Service (Linux) | EventPipe | Yes |
 | .NET (modern) | Containers | EventPipe | Yes |
-| .NET (modern) | Azure Functions | ETW | No |
+| .NET (modern) | Azure Functions (in-process, classic AI SDK) | ETW | No |
+| .NET (modern) | Azure Functions (isolated worker and/or OpenTelemetry) | EventPipe | Yes |
 | .NET (modern) | VMs / VMSS | ETW or EventPipe | No / Yes |
 | .NET (modern) | Service Fabric | ETW | No |
