@@ -13,9 +13,11 @@ When asked to enable the Application Insights Profiler for .NET, or when another
 2. **Identify the Application Insights resource** — If the investigation notes didn't have the resource or the user wants a different one, follow the steps in the [Standard Skill Preamble](../shared/standard-skill-preamble.md). After the resource is confirmed, **write or update `investigation-notes.md`** with the confirmed values. If only a resource ID is available, resolve the app ID using [resolve-app-id.md](../shared/resolve-app-id.md).
 
 3. **Check if the profiler is already active** — Run the script in [check-profiler-status.md](scripts/check-profiler-status.md) to query for both `ServiceProfilerIndex` (session-level) and `ServiceProfilerSample` (request-level) events.
-   - If both event types are found → the profiler is already enabled and capturing request data — inform the user and stop.
-   - If only `ServiceProfilerIndex` events exist (no `ServiceProfilerSample`) → the profiler IS running but is not capturing request-level samples. This is typically a traffic or trigger issue, not an enablement issue. Inform the user the profiler is enabled, and suggest checking traffic volume and trigger thresholds rather than re-enabling.
+   - If both event types are found → the profiler is already enabled and capturing request data — **confirm the data belongs to the target app before concluding** (see the caveat below), then inform the user and stop.
+   - If only `ServiceProfilerIndex` events exist (no `ServiceProfilerSample`) → the profiler IS running but is not capturing request-level samples. **Apply the shared-resource caveat below first** — if the index events belong to a different `cloud_RoleName`, treat the profiler as NOT enabled for this app and proceed to step 4. If the events do belong to the target app, this is typically a traffic or trigger issue, not an enablement issue. Inform the user the profiler is enabled, and suggest checking traffic volume and trigger thresholds rather than re-enabling.
    - If neither event type is found → the profiler is not enabled. Proceed to step 4.
+
+   > ⚠️ **Shared-resource caveat — avoid false positives.** A single Application Insights resource can receive telemetry from **multiple apps / cloud roles**. If the App ID was *inferred* (e.g., read from a connection string in `local.settings.json` or `appsettings.json`) rather than explicitly confirmed by the user, profiler events on that resource may belong to a **different app**. Before concluding "already enabled", break the events down by `cloud_RoleName` (the status script does this) and confirm with the user that the role producing profiler data is the app you are enabling. If it is a different role — or the target role shows zero profiler events — treat the profiler as **NOT enabled for this app** and proceed to step 4.
 
 4. **Check local source code for existing profiler configuration** — Before asking the user environment questions, inspect the source code in the working directory to determine whether the profiler is already configured in code and whether the connection string matches the target resource.
 
@@ -36,8 +38,12 @@ When asked to enable the Application Insights Profiler for .NET, or when another
    **4c. Infer environment from source code:**
    When source code is available, attempt to infer the answers to the environment questions below before asking them. This avoids redundant questions when the answers are already visible:
    - **Runtime**: Check `<TargetFramework>` in `*.csproj` — values like `net6.0`, `net8.0`, `net9.0`, `net10.0` indicate .NET (modern); `net48`, `net472` indicate .NET Framework.
-   - **Hosting**: Check for `*.bicep` or ARM template files — look for `kind: 'linux'` vs `kind: 'app'`, `Microsoft.Web/sites` (App Service), `Microsoft.ContainerInstance` (ACI), `Microsoft.App/containerApps` (Container Apps).
-   - **SDK**: Check `*.csproj` for `Azure.Monitor.OpenTelemetry.AspNetCore` (OTel) vs `Microsoft.ApplicationInsights.AspNetCore` (classic).
+   - **Hosting**: Check for `*.bicep` or ARM template files — look for `kind: 'linux'` vs `kind: 'app'`, `Microsoft.Web/sites` (App Service), `Microsoft.ContainerInstance` (ACI), `Microsoft.App/containerApps` (Container Apps). Also detect **Azure Functions** from the project itself: an `<AzureFunctionsVersion>` property or `Microsoft.Azure.Functions.Worker` package in `*.csproj`, a `host.json` file, or `FUNCTIONS_WORKER_RUNTIME` in `local.settings.json`. A value of `dotnet-isolated` means the **isolated worker** model (the profiler runs in your worker process), versus `dotnet` for the in-process model.
+   - **SDK**: Check `*.csproj` for the App Insights / OpenTelemetry packages:
+     - `Azure.Monitor.OpenTelemetry.AspNetCore` → OTel **distro** (`UseAzureMonitor()`).
+     - `Azure.Monitor.OpenTelemetry.Exporter` (often with `Microsoft.Azure.Functions.Worker.OpenTelemetry` and `ConfigureFunctionsWorkerDefaults()`) → OTel **exporter** path, common in Azure Functions isolated worker apps. `host.json` with `"telemetryMode": "OpenTelemetry"` is another strong OTel signal. Both OTel paths use the **EventPipe** profiler via `Azure.Monitor.OpenTelemetry.Profiler` / `AddAzureMonitorProfiler()`.
+     - `Microsoft.ApplicationInsights.AspNetCore` → classic SDK (version 2.x uses `AddServiceProfiler()`; version 3.x is OTel-based and uses `AddAzureMonitorProfiler()` — check the major version to select the correct profiler package).
+   - **Connection string source**: also look in `local.settings.json` (`APPLICATIONINSIGHTS_CONNECTION_STRING`) for Functions apps, in addition to `appsettings*.json`. Note the `ApplicationId` GUID embedded in a connection string is the App Insights **App ID** — but treat it as *inferred* (see the shared-resource caveat in step 3) until the user confirms it is this app's resource.
 
    If all three answers can be inferred, present them to the user for confirmation and skip the corresponding questions in step 5. If any are ambiguous, ask only the questions that couldn't be inferred.
 
@@ -57,6 +63,13 @@ When asked to enable the Application Insights Profiler for .NET, or when another
    - Azure Virtual Machines or Virtual Machine Scale Sets
    - Azure Service Fabric
    - Other / not sure
+
+   **Question 2b** (if Azure Functions selected and worker model not inferred): Which Azure Functions worker model are you using?
+   - In-process (`FUNCTIONS_WORKER_RUNTIME = dotnet`)
+   - Isolated worker (`FUNCTIONS_WORKER_RUNTIME = dotnet-isolated`)
+   - Not sure
+
+   > This determines the profiler agent: in-process uses **ETW** (no code change), isolated worker uses **EventPipe** (code change required). If the user is unsure, check `local.settings.json` or the Azure portal Function App configuration for `FUNCTIONS_WORKER_RUNTIME`.
 
    **Question 3** (if SDK not inferred, and .NET modern with EventPipe applicable): Which Application Insights SDK are you using?
    - Azure Monitor OpenTelemetry distribution (`Azure.Monitor.OpenTelemetry.AspNetCore`)
@@ -79,11 +92,14 @@ When asked to enable the Application Insights Profiler for .NET, or when another
    | .NET (modern) | App Service (Windows) | **ETW** (simplest) or **EventPipe** | No for ETW; Yes for EventPipe |
    | .NET (modern) | App Service (Linux) | **EventPipe** | Yes |
    | .NET (modern) | Containers (AKS, Container Apps, ACI) | **EventPipe** | Yes |
-   | .NET (modern) | Azure Functions (App Service plan) | **ETW** | No |
+   | .NET (modern) | Azure Functions — **in-process** (classic AI SDK), App Service plan | **ETW** | No |
+   | .NET (modern) | Azure Functions — **isolated worker** and/or **OpenTelemetry** | **EventPipe** | Yes |
    | .NET (modern) | VMs / VMSS | **ETW** or **EventPipe** | No for ETW; Yes for EventPipe |
    | .NET (modern) | Service Fabric | **ETW** | No |
 
    > ⚠️ **Do NOT use both ETW and EventPipe at the same time** — the combined overhead is not recommended.
+
+   > **Azure Functions note.** The ETW (no-code) Functions profiler attaches to the classic in-process Application Insights pipeline. An **isolated-worker** Functions app — especially one configured for **OpenTelemetry** (`telemetryMode: OpenTelemetry`, `Azure.Monitor.OpenTelemetry.Exporter`) — does not use that pipeline, so ETW may not produce profiler data for the worker process. In this case, use the **EventPipe** profiler in code: add `Azure.Monitor.OpenTelemetry.Profiler` and chain `.AddAzureMonitorProfiler()` onto the Functions OTel builder (e.g. `AddOpenTelemetry().UseFunctionsWorkerDefaults().UseAzureMonitorExporter().AddAzureMonitorProfiler()`). The profiler reads the connection string from `APPLICATIONINSIGHTS_CONNECTION_STRING`, so no extra wiring is needed when that is already set.
 
    ### Fetching enablement instructions
 
@@ -97,6 +113,7 @@ When asked to enable the Application Insights Profiler for .NET, or when another
    | ETW | Service Fabric | `https://learn.microsoft.com/en-us/azure/azure-monitor/profiler/profiler-servicefabric` | [enablement-overview.md](references/enablement-overview.md) |
    | EventPipe | App Service (Linux) | `https://learn.microsoft.com/en-us/azure/azure-monitor/profiler/profiler-aspnetcore-linux` | [enablement-overview.md](references/enablement-overview.md) |
    | EventPipe | Containers | `https://learn.microsoft.com/en-us/azure/azure-monitor/profiler/profiler-containers` | [enablement-overview.md](references/enablement-overview.md) |
+   | EventPipe | Azure Functions (isolated) | Use local reference directly (not yet documented upstream) | [enablement-overview.md](references/enablement-overview.md) |
    | EventPipe | Any (OTel SDK) | `https://github.com/Azure/azuremonitor-opentelemetry-profiler-net` | [enablement-overview.md](references/enablement-overview.md) |
 
    Present the enablement instructions to the user in a clear, step-by-step format. Include:
@@ -109,8 +126,8 @@ When asked to enable the Application Insights Profiler for .NET, or when another
 
 7. **Verify the profiler is producing data** — After the user has enabled the profiler and generated some traffic, re-run the [check-profiler-status.md](scripts/check-profiler-status.md) script to confirm profiler events are appearing. The profiler typically takes 2–5 minutes to start producing traces after enablement.
 
-   - If both `ServiceProfilerIndex` and `ServiceProfilerSample` events are found → full success. The profiler is capturing request-level data.
-   - If only `ServiceProfilerIndex` events appear → the profiler is running sessions but not capturing individual requests. This is normal if traffic is low — suggest the user generate more traffic and wait for the next profiling window.
+   - If both `ServiceProfilerIndex` and `ServiceProfilerSample` events are found → **apply the shared-resource caveat from step 3**: confirm the events' `cloud_RoleName` belongs to the target app before declaring success. If confirmed, the profiler is capturing request-level data — full success.
+   - If only `ServiceProfilerIndex` events appear → confirm `cloud_RoleName` matches the target app. If it does, the profiler is running sessions but not capturing individual requests. This is normal if traffic is low — suggest the user generate more traffic and wait for the next profiling window. If the events belong to a different role, treat as not yet producing data for this app.
    - If no events appear after the expected wait time, suggest troubleshooting:
    - Verify the connection string is correct
    - Check the application logs for profiler startup messages
